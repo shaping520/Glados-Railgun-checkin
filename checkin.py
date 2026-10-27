@@ -569,12 +569,12 @@ class ServerChanBackend(PushBackend):
 
 
 class WeComWebhookBackend(PushBackend):
-    """企业微信群机器人 Webhook 后端（markdown 消息）"""
+    """企业微信群机器人 Webhook 后端（纯文本消息）"""
 
     name = "企业微信Webhook"
 
-    """群机器人 markdown 内容上限 4096 字节，留出余量避免中文被截断"""
-    MAX_CONTENT_BYTES = 4000
+    """text 类型消息上限 2048 字节，留出余量避免中文被截断"""
+    MAX_CONTENT_BYTES = 2000
 
     """群机器人固定接口，只给了 key 时用它拼完整地址"""
     WECOM_API = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
@@ -609,26 +609,30 @@ class WeComWebhookBackend(PushBackend):
         return "https://" + value.lstrip("/")
 
     def _render(self, payload: dict) -> str:
-        # 企业微信不保留连续空格，原来的列对齐排版会挤成一坨，这里改用 · 分隔
+        """纯文本渲染。微信侧不渲染 markdown，任何 # / ** / > 都会原样显示成符号。"""
         title = str(payload.get("title") or "").lstrip("#").strip()
-        lines = [f"# {title}"] if title else []
+        lines = [title] if title else []
 
         rows = payload.get("rows") or []
         if rows:
             lines.append("")
             for r in rows:
-                line = (
-                    f"{r.get('emoji', '')} **#{r.get('index')} {r.get('status')}** · {r.get('domain')}"
-                    f" · +{r.get('points')} 积分 · 剩余 {r.get('days')} · 总计 {r.get('points_total')}"
-                )
-                if r.get("exchange"):
-                    line += f" · {r['exchange']}"
-                lines.append(line)
+                parts = [f"{r.get('emoji', '')} #{r.get('index')} {r.get('status')}", str(r.get("domain"))]
+                # 值为 None 的字段直接跳过，避免出现「剩余 None 天」这种噪音
+                for key, tmpl in (("points", "+{}分"), ("days", "剩{}天"), ("points_total", "总{}")):
+                    value = r.get(key)
+                    if value not in (None, "", "None"):
+                        parts.append(tmpl.format(value))
+                exchange = str(r.get("exchange") or "")
+                # 「未兑换」「跳过自动兑换」属正常状态，不占版面；失败只留结论
+                if exchange and "未兑换" not in exchange and "跳过" not in exchange:
+                    parts.append(exchange.split(":")[0].split("：")[0].strip())
+                lines.append(" · ".join(p for p in parts if p))
 
         note = payload.get("note")
         if note:
             lines.append("")
-            lines.append(f"> {note}")
+            lines.append(str(note))
         return "\n".join(lines)
 
     def _truncate(self, text: str) -> str:
@@ -663,8 +667,8 @@ class WeComWebhookBackend(PushBackend):
         logger.info(f"{LogEmoji.INFO} [{self.name}] 目标主机: {urlparse(self.webhook_url).hostname}（{self._shape}）")
 
         body = {
-            "msgtype": "markdown",
-            "markdown": {"content": self._truncate(self._render(payload))},
+            "msgtype": "text",
+            "text": {"content": self._truncate(self._render(payload))},
         }
         try:
             resp = requests.post(self.webhook_url, json=body, timeout=15)
