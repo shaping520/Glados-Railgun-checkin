@@ -1,6 +1,6 @@
 # Glados自动签到
 
-> 基于 GitHub Actions 的 GLaDOS 自动签到工具，支持多账号与多通道推送（PushDeer / Server酱）。
+> 基于 GitHub Actions 的 GLaDOS 自动签到工具，支持多账号与多通道推送（PushDeer / Server酱 / 企业微信 Webhook）。
 
 ## 文件结构
 
@@ -63,6 +63,7 @@
 
 - **PushDeer**：添加 `repository secret` 命名为 `PUSHDEER_SENDKEY`，其值对应 PushDeer key（[获取地址](https://www.pushdeer.com/product.html)）。
 - **Server酱**：添加 `repository secret` 命名为 `SERVERCHAN_SENDKEY`，其值对应 Server酱 SendKey（[获取地址](https://sct.ftqq.com/)）。
+- **企业微信 Webhook**：添加 `repository secret` 命名为 `WEB_HOOK`，其值为企业微信群机器人 Webhook 地址（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx`，群聊 → 右上角设置 → 群机器人 → 添加后复制）。该地址含 key，请勿提交到仓库或写入日志。
 
 ### Star 本仓库
 
@@ -73,7 +74,7 @@
 - **2026-01**: 重构代码，添加日志输出方便定位，支持新版网址，支持配置积分兑换策略。
 - **2026-04**: 优化代码逻辑与日志输出，支持[新版域名](https://railgun.info)，在 `GLADOS_COOKIES` 中添加新版域名下的 cookies 即可使用。
 - **2026-09**: 设备平台自适应重试（无需手动配置 UA 即可自动恢复签到）；网络层自动重试与退避，降低 CI 网络抖动导致的误报失败；日志时间统一为北京时间，定时任务调整为北京时间每天 2 次并避开整点高峰；默认关闭自动兑换，需显式配置后才启用。
-- **2026-10**: 日志级别短标签 `[I]/[W]/[E]` ；推送兼容 Server酱（策略模式多后端「都发」），新增 `requirements.txt` 。
+- **2026-10**: 日志级别短标签 `[I]/[W]/[E]` ；推送兼容 Server酱（策略模式多后端「都发」），新增 `requirements.txt` ；新增企业微信 Webhook 推送（`WEB_HOOK`，markdown 消息，超长自动按行截断）。
 
 ## 问题排查与定位
 

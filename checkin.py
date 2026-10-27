@@ -99,6 +99,7 @@ class Config:
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_SERVERCHAN_KEY = "SERVERCHAN_SENDKEY"
+    ENV_WEBHOOK = "WEB_HOOK"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
@@ -122,6 +123,7 @@ class Config:
     def __init__(self):
         self.push_key: str = ""
         self.serverchan_key: str = ""
+        self.webhook_url: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
@@ -131,6 +133,7 @@ class Config:
         """加载配置"""
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
         serverchan_key_env: Optional[str] = os.environ.get(self.ENV_SERVERCHAN_KEY)
+        webhook_env: Optional[str] = os.environ.get(self.ENV_WEBHOOK)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
@@ -146,6 +149,12 @@ class Config:
             self.serverchan_key = ""
         else:
             self.serverchan_key = serverchan_key_env
+
+        if not webhook_env:
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_WEBHOOK}' 未设置。")
+            self.webhook_url = ""
+        else:
+            self.webhook_url = webhook_env.strip()
 
         if not raw_cookies_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
@@ -167,7 +176,11 @@ class Config:
                 self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
 
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}，{self.ENV_SERVERCHAN_KEY} {'已设置' if serverchan_key_env else '未设置'}。")
+        logger.info(
+            f"{LogEmoji.INFO} 推送后端配置：{self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}，"
+            f"{self.ENV_SERVERCHAN_KEY} {'已设置' if serverchan_key_env else '未设置'}，"
+            f"{self.ENV_WEBHOOK} {'已设置' if webhook_env else '未设置'}。"
+        )
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
 
         if verbose_env is not None:
@@ -554,6 +567,85 @@ class ServerChanBackend(PushBackend):
             return False
 
 
+class WeComWebhookBackend(PushBackend):
+    """企业微信群机器人 Webhook 后端（markdown 消息）"""
+
+    name = "企业微信Webhook"
+
+    """群机器人 markdown 内容上限 4096 字节，留出余量避免中文被截断"""
+    MAX_CONTENT_BYTES = 4000
+
+    def __init__(self, webhook_url: str):
+        self.webhook_url = (webhook_url or "").strip()
+
+    def _render(self, payload: dict) -> str:
+        # 企业微信不保留连续空格，原来的列对齐排版会挤成一坨，这里改用 · 分隔
+        title = str(payload.get("title") or "").lstrip("#").strip()
+        lines = [f"# {title}"] if title else []
+
+        rows = payload.get("rows") or []
+        if rows:
+            lines.append("")
+            for r in rows:
+                line = (
+                    f"{r.get('emoji', '')} **#{r.get('index')} {r.get('status')}** · {r.get('domain')}"
+                    f" · +{r.get('points')} 积分 · 剩余 {r.get('days')} · 总计 {r.get('points_total')}"
+                )
+                if r.get("exchange"):
+                    line += f" · {r['exchange']}"
+                lines.append(line)
+
+        note = payload.get("note")
+        if note:
+            lines.append("")
+            lines.append(f"> {note}")
+        return "\n".join(lines)
+
+    def _truncate(self, text: str) -> str:
+        """按 UTF-8 字节数截断，避免多字节字符被切坏"""
+        if len(text.encode("utf-8")) <= self.MAX_CONTENT_BYTES:
+            return text
+        suffix = "\n…（内容过长已截断）"
+        budget = self.MAX_CONTENT_BYTES - len(suffix.encode("utf-8"))
+        kept, used = [], 0
+        for ch in text:
+            size = len(ch.encode("utf-8"))
+            if used + size > budget:
+                break
+            kept.append(ch)
+            used += size
+        cut = "".join(kept)
+        # 尽量落在行尾，避免把一条账号记录截成半句
+        newline = cut.rfind("\n")
+        if newline > len(cut) * 0.6:
+            cut = cut[:newline]
+        return cut + suffix
+
+    def send(self, title: str, payload: dict) -> bool:
+        if not self.webhook_url:
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址为空。")
+            return False
+        # 地址里带 key，只校验不打印，日志永不出现完整 URL
+        if not self.webhook_url.startswith("https://"):
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址必须以 https:// 开头。")
+            return False
+
+        body = {
+            "msgtype": "markdown",
+            "markdown": {"content": self._truncate(self._render(payload))},
+        }
+        try:
+            resp = requests.post(self.webhook_url, json=body, timeout=15)
+            data = resp.json()
+            if resp.status_code == 200 and isinstance(data, dict) and data.get("errcode") == 0:
+                return True
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: HTTP {resp.status_code} 接口返回 {data}")
+            return False
+        except Exception as e:
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
+            return False
+
+
 class PushService:
     """推送服务：聚合多个后端，向全部已配置后端发送（都发）"""
 
@@ -564,6 +656,8 @@ class PushService:
                 self.backends.append(PushDeerBackend(config.push_key))
             if getattr(config, "serverchan_key", ""):
                 self.backends.append(ServerChanBackend(config.serverchan_key))
+            if getattr(config, "webhook_url", ""):
+                self.backends.append(WeComWebhookBackend(config.webhook_url))
 
     def send(self, title: str, payload: dict) -> bool:
         """向所有已配置后端发送推送，只要有一个成功即视为成功"""
