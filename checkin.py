@@ -580,14 +580,26 @@ class WeComWebhookBackend(PushBackend):
     WECOM_API = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
 
     def __init__(self, webhook_url: str):
-        self.webhook_url = self._normalize(webhook_url)
+        raw = (webhook_url or "").strip()
+        # 只记录形状特征，不记录任何内容，用于定位 secret 填写错误
+        self._shape = (
+            f"长度={len(raw)}"
+            f",含协议头={'是' if '://' in raw else '否'}"
+            f",含key={'是' if 'key=' in raw else '否'}"
+            f",含路径={'是' if '/' in raw else '否'}"
+            f",含空格={'是' if any(c.isspace() for c in raw) else '否'}"
+        )
+        self.webhook_url = self._normalize(raw)
 
     @classmethod
     def _normalize(cls, raw: str) -> str:
-        """兼容三种常见写法：完整 URL、缺协议头的 URL、只给了 key。"""
+        """兼容常见写法：完整 URL、缺协议头的 URL、纯 key、带 key= 前缀的 key。"""
         value = (raw or "").strip().strip("\"'").strip()
         if not value:
             return ""
+        # 有人会把 "key=xxx" 整段粘进来，先去前缀当纯 key 处理
+        if value.lower().startswith("key="):
+            value = value[4:].strip()
         if value.startswith(("https://", "http://")):
             return "https://" + value.split("://", 1)[1]
         # 不含 / 和 ?，视为只提供了 key
@@ -647,8 +659,8 @@ class WeComWebhookBackend(PushBackend):
             logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址格式无效，应为企业微信群机器人地址或 key。")
             return False
 
-        # 地址里带 key，只打印主机名便于排查，日志永不出现完整 URL
-        logger.info(f"{LogEmoji.INFO} [{self.name}] 目标主机: {urlparse(self.webhook_url).hostname}")
+        # 地址里带 key，只打印主机名与形状特征便于排查，日志永不出现完整 URL
+        logger.info(f"{LogEmoji.INFO} [{self.name}] 目标主机: {urlparse(self.webhook_url).hostname}（{self._shape}）")
 
         body = {
             "msgtype": "markdown",
@@ -659,6 +671,12 @@ class WeComWebhookBackend(PushBackend):
             data = resp.json()
             if resp.status_code == 200 and isinstance(data, dict) and data.get("errcode") == 0:
                 return True
+            if isinstance(data, dict) and data.get("errcode") == 93000:
+                logger.error(
+                    f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址无效（errcode 93000），"
+                    f"请确认 WEB_HOOK 是有效的企业微信群机器人地址或 key，且机器人未被移除。{self._shape}"
+                )
+                return False
             logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: HTTP {resp.status_code} 接口返回 {data}")
             return False
         except Exception as e:
