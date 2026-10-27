@@ -3,6 +3,7 @@ import sys
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import requests
 from pypushdeer import PushDeer
@@ -575,8 +576,25 @@ class WeComWebhookBackend(PushBackend):
     """群机器人 markdown 内容上限 4096 字节，留出余量避免中文被截断"""
     MAX_CONTENT_BYTES = 4000
 
+    """群机器人固定接口，只给了 key 时用它拼完整地址"""
+    WECOM_API = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
+
     def __init__(self, webhook_url: str):
-        self.webhook_url = (webhook_url or "").strip()
+        self.webhook_url = self._normalize(webhook_url)
+
+    @classmethod
+    def _normalize(cls, raw: str) -> str:
+        """兼容三种常见写法：完整 URL、缺协议头的 URL、只给了 key。"""
+        value = (raw or "").strip().strip("\"'").strip()
+        if not value:
+            return ""
+        if value.startswith(("https://", "http://")):
+            return "https://" + value.split("://", 1)[1]
+        # 不含 / 和 ?，视为只提供了 key
+        if "/" not in value and "?" not in value:
+            return cls.WECOM_API + value
+        # 形如 qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx，补协议头即可
+        return "https://" + value.lstrip("/")
 
     def _render(self, payload: dict) -> str:
         # 企业微信不保留连续空格，原来的列对齐排版会挤成一坨，这里改用 · 分隔
@@ -623,12 +641,14 @@ class WeComWebhookBackend(PushBackend):
 
     def send(self, title: str, payload: dict) -> bool:
         if not self.webhook_url:
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址为空。")
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 未提供 webhook 地址或 key。")
             return False
-        # 地址里带 key，只校验不打印，日志永不出现完整 URL
-        if not self.webhook_url.startswith("https://"):
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址必须以 https:// 开头。")
+        if not self.webhook_url.startswith("https://") or any(c.isspace() for c in self.webhook_url):
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: webhook 地址格式无效，应为企业微信群机器人地址或 key。")
             return False
+
+        # 地址里带 key，只打印主机名便于排查，日志永不出现完整 URL
+        logger.info(f"{LogEmoji.INFO} [{self.name}] 目标主机: {urlparse(self.webhook_url).hostname}")
 
         body = {
             "msgtype": "markdown",
